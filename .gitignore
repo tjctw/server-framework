@@ -10,3 +10,6 @@ httpd
 
 # Doxygen
 html/
+
+# gprof output
+*.out
