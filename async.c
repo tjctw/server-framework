@@ -2,7 +2,7 @@
 
 #include <stdlib.h>
 #include <stdio.h>
-#include <signal.h>
+//#include <signal.h>
 #include <unistd.h>
 #include <pthread.h>
 #include <fcntl.h>
@@ -37,9 +37,14 @@ static int create_thread(pthread_t *thr,
                          void *(*thread_func)(void *),
                          void *async)
 {
-    return pthread_create(thr, NULL, thread_func, async);
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_JOINABLE);
+    return pthread_create(thr, &attr, thread_func, async);
 }
 
+//TODO: maybe a ring buffer will do the trick,
+//reduce the overhead of malloc
 /** A task node */
 struct AsyncTask {
     struct AsyncTask *next;
@@ -51,16 +56,19 @@ struct AsyncTask {
 struct Async {
     /** the task queue - MUST be first in the struct */
     pthread_mutex_t lock;              /**< a mutex for data integrity */
+    pthread_mutex_t wake_mutex;              /**< a mutex for data integrity */
+    pthread_cond_t wake_cv;
+
     struct AsyncTask * volatile tasks;  /**< active tasks */
     struct AsyncTask * volatile pool;   /**< a task node pool */
     struct AsyncTask ** volatile pos;   /**< the position for new tasks */
 
     /** The pipe used for thread wakeup */
-    struct {
-        int in;  /**< read incoming data (opaque data), used for wakeup */
-        int out; /**< write opaque data (single byte),
-                      used for wakeup signaling */
-    } pipe;
+    // struct {
+    //     int in;  /**< read incoming data (opaque data), used for wakeup */
+    //     int out; /**< write opaque data (single byte),
+    //                   used for wakeup signaling */
+    // } pipe;
 
     int count; /**< the number of initialized threads */
 
@@ -71,12 +79,13 @@ struct Async {
 };
 
 /* Task Management - add a task and perform all tasks in queue */
-
+//TODO: 50% of gprof
 static int async_run(async_p async, void (*task)(void *), void *arg)
 {
     struct AsyncTask *c;  /* the container, storing the task */
 
     if (!async || !task) return -1;
+
 
     pthread_mutex_lock(&(async->lock));
     /* get a container from the pool of grab a new container */
@@ -84,6 +93,8 @@ static int async_run(async_p async, void (*task)(void *), void *arg)
         c = async->pool;
         async->pool = async->pool->next;
     } else {
+
+        //blocks, should not call sys in locked area
         c = malloc(sizeof(*c));
         if (!c) {
             pthread_mutex_unlock(&async->lock);
@@ -98,6 +109,7 @@ static int async_run(async_p async, void (*task)(void *), void *arg)
     } else {
         async->tasks = c;
     }
+    //point pos the the pointer of next(null) AsyncTask
     async->pos = &(c->next);
     pthread_mutex_unlock(&async->lock);
     /* wake up any sleeping threads
@@ -106,13 +118,17 @@ static int async_run(async_p async, void (*task)(void *), void *arg)
      * we need to unlock before we write, or we will have excess
      * context switches.
      */
-    write(async->pipe.out, c->task, 1);
+    //write(async->pipe.out, c->task, 1);
+    pthread_cond_signal(&(async->wake_cv));
+
     return 0;
 }
 
 /** Performs all the existing tasks in the queue. */
 static void perform_tasks(async_p async)
 {
+    int b;
+    //threads ini完了以後， 每個thread都要來這領task
     struct AsyncTask *c = NULL;  /* c == container, will store the task */
     do {
         /* grab a task from the queue. */
@@ -131,24 +147,38 @@ static void perform_tasks(async_p async)
         /* perform the task */
         if (c) c->task(c->arg);
     } while (c);
+    b=0;
 }
 
 /* The worker threads */
 
 /* The worker cycle */
+//TODO: 50% of test-async
 static void *worker_thread_cycle(void *_async)
 {
     /* setup signal and thread's local-storage async variable. */
     struct Async *async = _async;
-    char sig_buf;
-
+    //char sig_buf;
+    unsigned char waken_flag = 0;
     /* pause for signal for as long as we're active. */
-    while (async->run && (read(async->pipe.in, &sig_buf, 1) >= 0)) {
+    //while (async->run && (read(async->pipe.in, &sig_buf, 1) >= 0)) {
+    while (1) {
+
+        pthread_mutex_lock(&(async->wake_mutex));
+        //do not wait again after waked up
+        if(waken_flag==0) pthread_cond_wait(&(async->wake_cv), &(async->wake_mutex));
+        pthread_mutex_unlock(&(async->wake_mutex));
+
+        waken_flag = 1;
+        // the tasks are not executed after run flag false
         perform_tasks(async);
+        if(async->run==0) break;
+
         sched_yield();
     }
 
-    perform_tasks(async);
+    //TODO: understand why we need tto perform tasks again...
+    //perform_tasks(async);
     return 0;
 }
 
@@ -159,7 +189,8 @@ static void async_signal(async_p async)
     async->run = 0;
     /* send `async->count` number of wakeup signales.
      * data content is irrelevant. */
-    write(async->pipe.out, async, async->count);
+    //write(async->pipe.out, async, async->count);
+    pthread_cond_broadcast(&(async->wake_cv));
 }
 
 static void async_wait(async_p async)
@@ -169,13 +200,17 @@ static void async_wait(async_p async)
     /* wake threads (just in case) by sending `async->count`
      * number of wakeups
      */
-    if (async->pipe.out)
-        write(async->pipe.out, async, async->count);
+    //if (async->pipe.out)
+    //    write(async->pipe.out, async, async->count);
+
+    pthread_cond_broadcast(&(async->wake_cv));
     /* join threads */
     for (int i = 0; i < async->count; i++) {
+
+        //will block until return
         join_thread(async->threads[i]);
     }
-    /* perform any pending tasks */
+    /* perform any pending tasks with main thread */
     perform_tasks(async);
     /* release queue memory and resources */
     async_destroy(async);
@@ -209,17 +244,20 @@ static void async_destroy(async_p async)
         free(to_free);
     }
     async->pool = NULL;
-    /* close pipe */
-    if (async->pipe.in) {
-        close(async->pipe.in);
-        async->pipe.in = 0;
-    }
-    if (async->pipe.out) {
-        close(async->pipe.out);
-        async->pipe.out = 0;
-    }
+    // /* close pipe */
+    // if (async->pipe.in) {
+    //     close(async->pipe.in);
+    //     async->pipe.in = 0;
+    // }
+    // if (async->pipe.out) {
+    //     close(async->pipe.out);
+    //     async->pipe.out = 0;
+    // }
     pthread_mutex_unlock(&async->lock);
     pthread_mutex_destroy(&async->lock);
+    pthread_mutex_destroy(&async->wake_mutex);
+    pthread_cond_destroy(&async->wake_cv);
+
     free(async);
 }
 
@@ -228,17 +266,26 @@ static async_p async_create(int threads)
     async_p async = malloc(sizeof(*async) + (threads * sizeof(pthread_t)));
     async->tasks = NULL;
     async->pool = NULL;
-    async->pipe.in = 0;
-    async->pipe.out = 0;
+    async->pos = NULL;
+    // async->pipe.in = 0;
+    // async->pipe.out = 0;
     if (pthread_mutex_init(&(async->lock), NULL)) {
         free(async);
         return NULL;
     };
-    if (pipe((int *) &(async->pipe))) {
+    if (pthread_mutex_init(&(async->wake_mutex), NULL)) {
         free(async);
         return NULL;
     };
-    fcntl(async->pipe.out, F_SETFL, O_NONBLOCK | O_WRONLY);
+    if (pthread_cond_init(&(async->wake_cv), NULL)) {
+        free(async);
+        return NULL;
+    };
+    // if (pipe((int *) &(async->pipe))) {
+    //     free(async);
+    //     return NULL;
+    // };
+    // fcntl(async->pipe.out, F_SETFL, O_NONBLOCK | O_WRONLY);
     async->run = 1;
     /* create threads */
     for (async->count = 0; async->count < threads; async->count++) {

@@ -10,11 +10,13 @@ OUT ?= .build
 all: $(OUT) $(EXEC)
 
 CC ?= gcc
-CFLAGS = -std=gnu99 -Wall -O2 -g
-ifeq ($(strip $(PROFILE)),1)
-PROF_FLAGS = -pg -g
+CFLAGS = -std=gnu99 -Wall -g
+ifeq ($(strip $(PG)),1)
+PROF_FLAGS = -O0 -pg -g
 CFLAGS += $(PROF_FLAGS)
 LDFLAGS += $(PROF_FLAGS)
+else
+CFLAGS += -O2
 endif
 
 CFLAGS += -I .
@@ -66,7 +68,7 @@ astyle:
 	astyle --style=kr --indent=spaces=4 --indent-switches --suffix=none *.[ch]
 
 bench:
-	ab -c 32 -n 100 http://localhost:8080/
+	ab -c 32 -n 64 http://localhost:8080/
 
 clean:
 	$(RM) $(EXEC) $(OBJS) $(deps) *.dot *.png gmon.out
