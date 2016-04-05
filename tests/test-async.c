@@ -70,7 +70,7 @@ int main(void)
     Async.run(async, schedule_tasks, async);
 
     /* wait for all tasks to finish, closing threads, clearing memory */
-    Async.wait(async);
+    Async.finish(async);
     clock_gettime(CLOCK_REALTIME, &now);
     fprintf(stderr, "# elapsed time: (%lf) ms\n", time_diff(start, now));
     return 0;

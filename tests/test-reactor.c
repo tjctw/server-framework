@@ -38,6 +38,7 @@ void on_data(struct Reactor *reactor, int fd)
             "\r\n"
             "Hello World!\r\n";
 
+        //will block on recv
         if ((len = recv(fd, buff, sizeof(buff), 0)) > 0)
             len = write(fd, response, strlen(response));
     }

@@ -1,7 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#define THREAD_COUNT 1
+#define THREAD_COUNT 32
 
 #include "protocol-server.h"
 

@@ -10,7 +10,7 @@ OUT ?= .build
 all: $(OUT) $(EXEC)
 
 CC ?= gcc
-CFLAGS = -std=gnu99 -Wall -g
+CFLAGS = -std=gnu99 -Wall 
 ifeq ($(strip $(PG)),1)
 PROF_FLAGS = -O0 -pg -g
 CFLAGS += $(PROF_FLAGS)
